@@ -1,0 +1,9 @@
+MODEL:
+  NUM_STATE: 4
+  NUM_ACTION: 2
+
+  GAMMA: 0.99
+  LAMBDA: 0.95
+  EPS_CLIP: 0.2
+ENV:
+  test: 2
