@@ -1,5 +1,5 @@
 # model.py
-import numpy as np
+
 import torch
 import torch.nn as nn
 import torch.optim as optim
@@ -8,14 +8,12 @@ from torch.distributions.categorical import Categorical
 
 
 class ModelWrapper:
-    def __init__(self, model_path, config):
+    def __init__(self, config):
         self.config = config["MODEL"]
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
         self.actor = Actor(self.config["NUM_STATE"], self.config["NUM_ACTION"]).to(self.device)
         self.critic = Critic(self.config["NUM_STATE"]).to(self.device)
-
-        self.load_state_dict(model_path)
 
     def create_optimizer(self, learning_rate):
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=learning_rate)
@@ -56,14 +54,10 @@ class ModelWrapper:
 
     def preprocess_data(self, states, next_states, actions, rewards, log_probs, dones):
         with torch.no_grad():
-            states_tensor = torch.from_numpy(states).to(self.device)
-            next_states_tensor = torch.from_numpy(next_states).to(self.device)
-            values = self.critic(states_tensor).view(-1)
-            next_values = self.critic(next_states_tensor).view(-1)
-            values = values.cpu().numpy()
-            next_values = next_values.cpu().numpy()
+            values = self.critic(states).view(-1)
+            next_values = self.critic(next_states).view(-1)
 
-            advantages = np.zeros_like(rewards, dtype=np.float32)
+            advantages = torch.zeros_like(rewards, dtype=torch.float32)
             delta = rewards + self.config["GAMMA"] * next_values * (1 - dones) - values
             gae = 0.0
             for i in reversed(range(len(rewards))):
