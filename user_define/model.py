@@ -8,17 +8,16 @@ from torch.distributions.categorical import Categorical
 
 
 class ModelWrapper:
-    def __init__(self, model_path, learning_rate, config):
-        super().__init__()
+    def __init__(self, model_path, config):
         self.config = config["MODEL"]
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
-        self.actor = Actor(self.config["NUM_STATE"], self.config["NUM_ACTION"]).to(
-            self.device
-        )
+        self.actor = Actor(self.config["NUM_STATE"], self.config["NUM_ACTION"]).to(self.device)
         self.critic = Critic(self.config["NUM_STATE"]).to(self.device)
 
-        self.load_model(model_path)
+        self.load_state_dict(model_path)
+
+    def create_optimizer(self, learning_rate):
         self.actor_optimizer = optim.Adam(self.actor.parameters(), lr=learning_rate)
         self.critic_optimizer = optim.Adam(self.critic.parameters(), lr=learning_rate)
 
@@ -36,18 +35,13 @@ class ModelWrapper:
             model_path,
         )
 
-    def load_model(self, model_path):
+    def load_state_dict(self, model_path):
         try:
-            self.actor.load_state_dict(
-                torch.load(model_path, map_location=self.device, weights_only=True)[
-                    "actor"
-                ]
+            model_state_dict = torch.load(
+                model_path, map_location=self.device, weights_only=True
             )
-            self.critic.load_state_dict(
-                torch.load(model_path, map_location=self.device, weights_only=True)[
-                    "critic"
-                ]
-            )
+            self.actor.load_state_dict(model_state_dict["actor"])
+            self.critic.load_state_dict(model_state_dict["critic"])
             print(f"Model loaded successfully at {model_path}.")
         except FileNotFoundError:
             print(f"Model file not found at {model_path}.")
@@ -66,33 +60,30 @@ class ModelWrapper:
             next_states_tensor = torch.from_numpy(next_states).to(self.device)
             values = self.critic(states_tensor).view(-1)
             next_values = self.critic(next_states_tensor).view(-1)
-        values = values.cpu().numpy()
-        next_values = next_values.cpu().numpy()
+            values = values.cpu().numpy()
+            next_values = next_values.cpu().numpy()
 
-        advantages = np.zeros_like(rewards, dtype=np.float32)
-        delta = rewards + self.config["GAMMA"] * next_values * (1 - dones) - values
-        gae = 0.0
-        for i in reversed(range(len(rewards))):
-            gae = (
-                delta[i]
-                + self.config["GAMMA"] * self.config["LAMBDA"] * (1 - dones[i]) * gae
-            )
-            advantages[i] = gae
+            advantages = np.zeros_like(rewards, dtype=np.float32)
+            delta = rewards + self.config["GAMMA"] * next_values * (1 - dones) - values
+            gae = 0.0
+            for i in reversed(range(len(rewards))):
+                gae = (delta[i] + self.config["GAMMA"] * self.config["LAMBDA"] * (1 - dones[i]) * gae)
+                advantages[i] = gae
 
-        if advantages.shape[0] > 1:
-            std = advantages.std() + 1e-8
-        else:
-            std = 1.0  # 또는 1e-8
-        normalized_advantage = (advantages - advantages.mean()) / std
+            td_target = advantages + values
 
-        td_target = normalized_advantage + values
+            if advantages.shape[0] > 1:
+                std = advantages.std() + 1e-8
+            else:
+                std = 1.0  # 또는 1e-8
+            normalized_advantage = (advantages - advantages.mean()) / std
 
         return {"advantage": normalized_advantage, "td_target": td_target}
 
 
-    def train_model(self, batch_state, batch_next_state, batch_action, batch_reward, batch_log_prob, batch_done, preprocess_data):
-        batch_advantage = preprocess_data["advantage"]
-        batch_td_target = preprocess_data["td_target"]
+    def train_model(self, batch_state, batch_next_state, batch_action, batch_reward, batch_log_prob, batch_done, batch_preprocess):
+        batch_advantage = batch_preprocess["advantage"]
+        batch_td_target = batch_preprocess["td_target"]
         batch_value = self.critic(batch_state)
         batch_pi_dist = self.actor(batch_state)
         batch_new_prob = batch_pi_dist.log_prob(batch_action)

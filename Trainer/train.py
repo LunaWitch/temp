@@ -1,5 +1,4 @@
 import numpy as np
-from torch.distributed import is_initialized, destroy_process_group
 import yaml
 import wandb
 
@@ -24,7 +23,6 @@ from Trainer.actor import Actor
 from Trainer.worker import Worker
 from pathlib import Path
 from util.path_util import get_config_dir, get_user_define_dir, get_result_dir
-from user_define.model import ModelWrapper
 
 CONFIG_DIR = get_config_dir()
 USER_DEFINE_DIR = get_user_define_dir()
@@ -40,47 +38,40 @@ def run(user_config_name):
     with open(USER_DEFINE_DIR / user_config_name, "r") as f:
         user_config = yaml.safe_load(f)
 
-    generations = system_config["TRAIN"]["NUM_GENERATION"]
+    generations = system_config["NUM_GENERATION"]
 
-    prev_checkpoint = None
+    checkpoint = None
     for generation in range(generations):
-        dataset = collect_episode(system_config, user_config)
-        dataset = preprocess_data(dataset, system_config, user_config)
-        #dataset = dataset.random_shuffle()
-        #dataset = dataset.repartition(system_config["RAY"]["NUM_TRAINER"])
-        trainer = get_trainer(dataset, prev_checkpoint, system_config, user_config)
+        dataset = collect_episode(checkpoint, system_config, user_config)
+        dataset = preprocess_data(dataset, checkpoint, system_config, user_config)
+        trainer = get_trainer(dataset, checkpoint, system_config, user_config)
         result = trainer.fit()
-        prev_checkpoint = save_latest_model(result, system_config, user_config)
-        # TODO Validation -> Log / Early Stop
-
-
-def collect_episode(system_config, user_config):
+        checkpoint = save_latest_model(result, system_config, user_config)
+        if validate_model(checkpoint, system_config, user_config) :
+            break
+        
+def collect_episode(checkpoint, system_config, user_config):
     print("collect_episode")
     ray_config = system_config["RAY"]
     train_config = system_config["TRAIN"]
     num_actor = ray_config["NUM_ACTOR"]
     num_episode = train_config["NUM_EPISODE"]
-    episode_per_actor = num_episode // num_actor
 
-    latest_model_name = train_config["LATEST_MODEL_NAME"]
-    model_path = RESULT_DIR / latest_model_name
+    if checkpoint:
+        with checkpoint.as_directory() as CHECK_POINT_DIR:
+            model_path = Path(CHECK_POINT_DIR) / ray_config["CHECKPOINT_MODEL_NAME"]
+    else :
+        model_path = RESULT_DIR / train_config["LATEST_MODEL_NAME"]
     actors = [Actor.remote(model_path, user_config, system_config) for _ in range(num_actor)]
     ray.get([actor.ready.remote() for actor in actors])
 
     num_trajectory = train_config["NUM_TRAJECTORY"]
-    pending = [
-        actor.get_episode.remote(num_trajectory)
-        for actor in actors
-        for _ in range(episode_per_actor)
-    ]
-
-    all_training_data = []
-    for _ in tqdm(range(len(pending))):
-        done, pending = ray.wait(pending, num_returns=num_actor)
-        results = ray.get(done)
-        for data in results:
-            all_training_data.extend(data)
-
+    pending = []
+    for i in range(num_episode):
+        actor = actors[i % num_actor]
+        pending.append(actor.get_episode.remote(num_trajectory))
+    results = ray.get(pending)
+    all_training_data = [item for result in results for item in result]
     dataset = from_items([
         {
             "state": state,
@@ -94,11 +85,15 @@ def collect_episode(system_config, user_config):
     ])
     return dataset
 
-
-def preprocess_data(dataset, system_config, user_config):
+def preprocess_data(dataset, checkpoint, system_config, user_config):
     print("preprocess_data")
     train_config = system_config["TRAIN"]
-    model_path = RESULT_DIR / train_config["LATEST_MODEL_NAME"]
+    ray_config = system_config["RAY"]
+    if checkpoint:
+        with checkpoint.as_directory() as CHECK_POINT_DIR:
+            model_path = Path(CHECK_POINT_DIR) / ray_config["CHECKPOINT_MODEL_NAME"]
+    else :
+        model_path = RESULT_DIR / train_config["LATEST_MODEL_NAME"]
     worker = Worker(model_path, user_config, system_config)
 
     new_items = []
@@ -110,9 +105,7 @@ def preprocess_data(dataset, system_config, user_config):
         log_prob = np.stack(batch["log_prob"])
         done = np.stack(batch["done"])
 
-        processed = worker.preprocess_data(
-            state, next_state, action, reward, log_prob, done
-        )
+        processed = worker.preprocess_data(state, next_state, action, reward, log_prob, done)
 
         for i in range(len(state)):
             item = {key: batch[key][i] for key in batch}
@@ -120,7 +113,6 @@ def preprocess_data(dataset, system_config, user_config):
                 item[key] = processed[key][i]
             new_items.append(item)
     return from_items(new_items)
-
 
 def get_trainer(dataset, prev_checkpoint, system_config, user_config):
     print("get_trainer")
@@ -150,63 +142,80 @@ def get_trainer(dataset, prev_checkpoint, system_config, user_config):
     )
     return trainer
 
-
 def train_loop_per_worker(config):
     print("train_loop")
-    system_config = config.get("SYSTEM_CONFIG")
-    user_config = config.get("USER_CONFIG")
+    system_config = config["SYSTEM_CONFIG"]
+    user_config = config["USER_CONFIG"]
     checkpoint = config.get("CHECKPOINT")
 
     ray_config = system_config["RAY"]
     train_config = system_config["TRAIN"]
     wandb_config = system_config["WANDB"]
 
-    model_path = RESULT_DIR / train_config["LATEST_MODEL_NAME"]
-
+    if checkpoint:
+        with checkpoint.as_directory() as CHECK_POINT_DIR:
+            model_path = Path(CHECK_POINT_DIR) / ray_config["CHECKPOINT_MODEL_NAME"]
+    else:
+        model_path = RESULT_DIR / train_config["LATEST_MODEL_NAME"]
     worker = Worker(model_path, user_config, system_config)
     worker.prepare_model()
-
     worker_id = session.get_world_rank()
-    if wandb_config["ENABLE"] and worker_id == 0:
+    use_wandb = wandb_config["ENABLE"] and worker_id == 0
+    if use_wandb:
         wandb.require("core")
         wandb.init(
             project=wandb_config["PROJECT_NAME"],
             name=f"{session.get_experiment_name()}",
             reinit=True,
         )
-        wandb.watch((worker.model.actor, worker.model.critic), log="all", log_freq=100)
+        wandb.watch(worker.get_model_list(), log="all", log_freq=100)
 
     num_epoch = train_config["NUM_EPOCH"]
-
+    batch_size = train_config["BATCH_SIZE"]
     dataset = session.get_dataset_shard("train")
+
     for epoch in range(num_epoch):
-        batch_iterator = dataset.iter_torch_batches(batch_size=train_config["BATCH_SIZE"])
         cumulative = defaultdict(float)
-        cumulative_count = defaultdict(int)
-        for batch in batch_iterator:
-            batch_state = batch["state"].float()
-            batch_action = batch["action"].float()
-            batch_reward = batch["reward"].float()
-            batch_next_state = batch["next_state"].float()
-            batch_log_prob = batch["log_prob"].float()
-            batch_done = batch["done"].float()
-            metric = worker.train_model(batch_state, batch_next_state, batch_action, batch_reward, batch_log_prob, batch_done, batch)
-            for k, v in metric.items():
+        count = defaultdict(int)
+        for batch in dataset.iter_torch_batches(batch_size=batch_size):
+            float_keys = ["state", "next_state", "action", "reward", "log_prob", "done"]
+            tensors = {k: batch[k].float() for k in float_keys}
+            preprocess = {
+                k: v.float() for k, v in batch.items() if k not in float_keys
+            }
+
+            metrics = worker.train_model(
+                tensors["state"],
+                tensors["next_state"],
+                tensors["action"],
+                tensors["reward"],
+                tensors["log_prob"],
+                tensors["done"],
+                preprocess,
+            )
+
+            for k, v in metrics.items():
                 cumulative[k] += v.item()
-                cumulative_count[k] += 1
+                count[k] += 1
 
-        avg_metric = {k: cumulative[k] / cumulative_count[k] for k in cumulative}
+        # 평균 계산 및 로그 기록
+        avg_metric = {k: cumulative[k] / count[k] for k in cumulative}
         avg_metric["epoch"] = (epoch + 1) / num_epoch
-        if wandb_config["ENABLE"] and worker_id == 0:
-            wandb.log(avg_metric)
-        
-        with TemporaryDirectory() as temp:
-            temp_path = Path(temp) / ray_config["CHECKPOINT_MODEL_NAME"]
-            worker.save_model(temp_path)
-            checkpoint = Checkpoint.from_directory(temp)
-            train.report(metrics=avg_metric, checkpoint=checkpoint)
 
-    if wandb_config["ENABLE"] and worker_id == 0:
+        if use_wandb:
+            wandb.log(avg_metric)
+
+        # Checkpoint 저장 (마지막 epoch만)
+        if epoch == num_epoch - 1:
+            with TemporaryDirectory() as temp:
+                temp_path = Path(temp) / ray_config["CHECKPOINT_MODEL_NAME"]
+                worker.save_model(temp_path)
+                checkpoint = Checkpoint.from_directory(temp)
+                train.report(metrics=avg_metric, checkpoint=checkpoint)
+        else:
+            train.report(metrics=avg_metric)
+
+    if use_wandb:
         wandb.finish()
 
 def save_latest_model(result, system_config, user_config):
@@ -221,3 +230,30 @@ def save_latest_model(result, system_config, user_config):
             print(f"Training finished. New model saved to {latest_model_path}")
         return best_checkpoint
     return None
+
+def validate_model(checkpoint, system_config, user_config):
+    print("validate_model")
+    ray_config = system_config["RAY"]
+    train_config = system_config["TRAIN"]
+    
+    validate_config = system_config["VALIDATE"]
+    num_actor = ray_config["NUM_ACTOR"]
+    num_episode = validate_config["NUM_EPISODE"]
+    if checkpoint:
+        with checkpoint.as_directory() as CHECK_POINT_DIR:
+            model_path = Path(CHECK_POINT_DIR) / ray_config["CHECKPOINT_MODEL_NAME"]
+    else :
+        model_path = RESULT_DIR / train_config["LATEST_MODEL_NAME"]
+    actors = [Actor.remote(model_path, user_config, system_config) for _ in range(num_actor)]
+    ray.get([actor.ready.remote() for actor in actors])
+
+    num_trajectory = validate_config["NUM_TRAJECTORY"]
+    pending = []
+    for i in range(num_episode):
+        actor = actors[i % num_actor]
+        pending.append(actor.get_score.remote(num_trajectory))
+    
+    results = ray.get(pending)
+    score = np.mean(results)
+    print(f"Result {score}")
+    return score >= validate_config["SCORE"]
