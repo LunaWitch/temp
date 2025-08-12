@@ -2,16 +2,17 @@ import numpy as np
 import torch
 import ray
 
-from user_define.environment import EnvWrapper
-from user_define.model import ModelWrapper
+from util.import_util import get_class
 @ray.remote
 class Actor:
     def __init__(self, user_config, system_config):
         self.config = user_config
         self.system = system_config
-
-        self.model = ModelWrapper(self.config)
-        self.env = EnvWrapper(self.config)
+        
+        Model = get_class(user_config["MODEL_MODULE"], user_config["MODEL_CLASS"])
+        Env = get_class(user_config["ENV_MODULE"], user_config["ENV_CLASS"])
+        self.model = Model(self.config)
+        self.env = Env(self.config)
 
     def ready(self, model_path: str) -> bool:
         self.model.load_state_dict(model_path)
