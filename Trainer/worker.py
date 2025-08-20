@@ -1,19 +1,16 @@
 from ray import train
+import torch
 
 from util.import_util import get_class
 class Worker:
-    def __init__(self, user_config, system_config):
-        self.config = user_config
-        self.system = system_config
-        self.learning_rate = self.system["TRAIN"]["LEARNING_RATE"]
-
-        Model = get_class(user_config["MODEL_MODULE"], user_config["MODEL_CLASS"])
-        Env = get_class(user_config["ENV_MODULE"], user_config["ENV_CLASS"])
-        self.model = Model(self.config)
-        self.env = Env(self.config)
+    def __init__(self, model_config, env_config, system_config):
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+        self.learning_rate = system_config['TRAIN']['LEARNING_RATE']
+        Model = get_class(model_config['MODEL_MODULE'], model_config['MODEL_CLASS'])
+        self.model = Model(self.device, model_config)
 
     def ready(self, model_path):
-        self.model.load_state_dict(model_path)
+        self.model.load_model(model_path)
         model_dict = self.model.get_model()
 
         for name, model in model_dict.items():
@@ -26,21 +23,10 @@ class Worker:
         return True
 
     def train_model(self, batch):
-        float_keys = ["state", "next_state", "action", "reward", "log_prob", "done"]
-        tensors = {k: batch[k].float() for k in float_keys}
-        preprocess = {
-            k: v.float() for k, v in batch.items() if k not in float_keys
+        batches = {
+            k: torch.tensor(v).float().to(self.device) for k, v in batch.items()
         }
-
-        return self.model.train_model(
-                tensors["state"].float(),
-                tensors["next_state"].float(),
-                tensors["action"].float(),
-                tensors["reward"].float(),
-                tensors["log_prob"].float(),
-                tensors["done"].float(),
-                preprocess
-            )
+        return self.model.train_model(batches)
 
     def save_model(self, model_path):
         return self.model.save_model(model_path)

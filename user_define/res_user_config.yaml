@@ -1,0 +1,37 @@
+NAME : 'resource_allocation'
+
+COMMON:
+  ENV_MODULE : 'user_define.res_environment'
+  ENV_CLASS : 'EnvWrapper'
+  MODEL_MODULE : 'user_define.res_model'
+  MODEL_CLASS : 'ModelWrapper'
+
+  # MODEL, ENV 공통 사용
+  POWER_MIN: -160
+  POWER_MAX: 0
+  NUM_POWER_CLASS: 161
+  NUM_FREQ: 5
+  CIR_THRESHOLD: 22
+MODEL:
+  # MODEL에서 사용
+  GAMMA: 0.99
+  LAMBDA: 0.95
+  EPS_CLIP: 0.2
+  
+  D_MODEL: 128
+  N_HEAD: 4
+  DIM_FEEDFORWARD: 256
+  ACTOR_NUM_LAYERS: 6
+  CRITIC_NUM_LAYERS: 6
+  DROPOUT: 0.0
+ENV:
+  # ENV에서 사용 TRAIN / EVALUATION / VALIDATION 고정
+  TRAIN:
+    DATASET: 'train_IAB'
+    ENV_BATCH: 8
+  EVALUATION:
+    DATASET: 'test_IAB'
+    ENV_BATCH: 100
+  VALIDATION:
+    DATASET: 'train_IAB'
+    ENV_BATCH: 8

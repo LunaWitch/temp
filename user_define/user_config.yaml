@@ -1,4 +1,10 @@
-NAME : "PPO"
+NAME : 'PPO'
+COMMON:
+  MODEL_MODULE : 'user_define.model'
+  MODEL_CLASS : 'ModelWrapper'
+  ENV_MODULE : 'user_define.environment'
+  ENV_CLASS : 'EnvWrapper'
+
 MODEL:
   NUM_STATE: 4
   NUM_ACTION: 2
@@ -7,10 +13,6 @@ MODEL:
   LAMBDA: 0.95
   EPS_CLIP: 0.2
 ENV:
-  test: 2
-
-ENV_MODULE : "user_define.environment"
-ENV_CLASS : "EnvWrapper"
-
-MODEL_MODULE : "user_define.model"
-MODEL_CLASS : "ModelWrapper"
+  TRAIN:
+  EVALUATION:
+  VALIDATION:
