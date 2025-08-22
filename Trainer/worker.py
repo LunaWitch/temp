@@ -22,11 +22,11 @@ class Worker:
             model.train()
         return True
 
+    def collate_fn(self, batch):
+        return self.model.collate_fn(batch)
+
     def train_model(self, batch):
-        batches = {
-            k: torch.tensor(v).float().to(self.device) for k, v in batch.items()
-        }
-        return self.model.train_model(batches)
+        return self.model.train_model(batch)
 
     def save_model(self, model_path):
         return self.model.save_model(model_path)

@@ -40,8 +40,9 @@ class Trainer:
         dataset = self.collect_episode(self.checkpoint[name], self.system_config, user_config)
         result = self.train_model(dataset, self.checkpoint[name], self.system_config, user_config)
         self.checkpoint[name] = self.save_latest_model(result, self.system_config, user_config)
-        if self.validate_model(self.checkpoint[name], self.system_config, user_config) :
-            return True
+        self.validate_model(self.checkpoint[name], self.system_config, user_config) 
+        #if self.validate_model(self.checkpoint[name], self.system_config, user_config) :
+        #    return True
         return False
 
     def collect_episode(self, checkpoint, system_config, user_config):
@@ -68,6 +69,7 @@ class Trainer:
         print(f'make dataset')
         all_training_data = [item for result in results for item in result]
         dataset = from_items(all_training_data)
+        dataset = dataset.random_shuffle()
         return dataset
 
     def train_model(self, dataset, prev_checkpoint, system_config, user_config):
@@ -189,5 +191,5 @@ class Trainer:
         
         results = ray.get(pending)
         score = sum(results) / len(results)
-        print(f'result {score}')
+        print(f'Result {score}')
         return score >= system_config['VALIDATE']['SCORE']

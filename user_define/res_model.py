@@ -51,14 +51,15 @@ class ModelWrapper:
     
     def get_action(self, state, info):
         with torch.no_grad():
+            s = torch.as_tensor(state, dtype=torch.float32, device=self.device)
             node_power_attn = info['x']
             edge_power_attn = info['edge_attr']
             edge_index = info['edge_index']
             ptr = info['ptr']
-            dist = self.actor(freq_alloc=state, node_power_attn=node_power_attn, edge_power_attn=edge_power_attn, edge_index=edge_index, ptr=ptr)
+            dist = self.actor(freq_alloc=s, node_power_attn=node_power_attn, edge_power_attn=edge_power_attn, edge_index=edge_index, ptr=ptr)
             action = dist.sample()
             log_prob = dist.log_prob(action)
-            return action, log_prob
+            return action.reshape(-1), log_prob
 
     def get_value(self, state, info):
         with torch.no_grad():
@@ -69,7 +70,7 @@ class ModelWrapper:
             value = self.critic(freq_alloc=state, node_power_attn=node_power_attn, edge_power_attn=edge_power_attn, edge_index=edge_index, batch=batch)
             return value.item()
 
-    def preprocess_data(self, states, next_states, values, next_values, actions, rewards, log_probs, ongoings, infos):
+    def preprocess_data(self, states, next_states, values, next_values, actions, log_probs, rewards, ongoings, infos):
         advantages = torch.zeros_like(rewards, dtype=torch.float32)
         delta = rewards + self.config['GAMMA'] * next_values * ongoings - values
         gae = 0.0
@@ -77,7 +78,6 @@ class ModelWrapper:
             gae = (delta[i] + self.config['GAMMA'] * self.config['LAMBDA'] * ongoings[i] * gae)
             advantages[i] = gae
         td_target = advantages + values
-
         if advantages.shape[0] > 1:
             std = advantages.std() + 1e-8
         else:
@@ -89,30 +89,21 @@ class ModelWrapper:
     def collate_fn(self, batch):
         out = defaultdict(list)
         for k, v in batch.items():
-            out[k].append(v)
-        for i in range(len(batch['x'])):  # batch_size만큼 반복
+            out[k].append(torch.from_numpy(np.array(v, copy=True)))
+        for i in range(len(batch['x'])):
             data = Data(
                 x=torch.tensor(batch['x'][i], dtype=torch.float32),
                 edge_index=torch.tensor(batch['edge_index'][i], dtype=torch.long),
                 edge_attr=torch.tensor(batch['edge_attr'][i], dtype=torch.float32)
             )
             out['graph'].append(data)
-        batch_state = torch.cat(out['state'], dim=0).reshape(-1, out['state'][0].shape[-1]).to(self.device)
-        batch_value = torch.cat(out['value'], dim=0).reshape(-1).to(self.device)
-        batch_action = torch.cat(out['action'], dim=0).reshape(-1, out['action'][0].shape[-1]).to(self.device)
-        batch_log_prob = torch.cat(out['log_prob'], dim=0).reshape(-1).to(self.device)
-        batch_advantage = torch.cat(out['advantage'], dim=0).reshape(-1).to(self.device)
-        batch_td_target = torch.cat(out['td_target'], dim=0).reshape(-1).to(self.device)
         batch_graph = Batch.from_data_list(out['graph']).to(self.device)
-        print(f"batch_state: {batch_state.requires_grad}")
-        print(f"batch_value: {batch_value.requires_grad}")
-        print(f"batch_action: {batch_action.requires_grad}")
-        print(f"batch_log_prob: {batch_log_prob.requires_grad}")
-        print(f"batch_advantage: {batch_advantage.requires_grad}")
-        print(f"batch_td_target: {batch_td_target.requires_grad}")
-        print(f"batch_graph.x: {batch_graph.x.requires_grad}")
-        print(f"batch_graph.edge_index: {batch_graph.edge_index.requires_grad}")
-        print(f"batch_graph.edge_attr: {batch_graph.edge_attr.requires_grad}")
+        batch_state = torch.cat(out['state'], dim=0).reshape(-1, out['state'][0].shape[-1]).to(self.device)
+        batch_value = torch.cat(out['value'], dim=0).to(self.device)
+        batch_action = torch.cat(out['action'], dim=0).to(self.device)
+        batch_log_prob = torch.cat(out['log_prob'], dim=0).to(self.device)
+        batch_advantage = torch.cat(out['advantage'], dim=0).to(self.device)
+        batch_td_target = torch.cat(out['td_target'], dim=0).to(self.device)
         return batch_state, batch_value, batch_action, batch_log_prob, batch_advantage, batch_td_target, batch_graph 
 
     def train_model(self, batch):
@@ -125,16 +116,17 @@ class ModelWrapper:
         actor_loss = -torch.min(policy_gradient, clipped).mean()
         batch_value = self.critic(freq_alloc=batch_state,  node_power_attn=batch_graph['x'], edge_power_attn=batch_graph['edge_attr'], edge_index=batch_graph['edge_index'], batch=batch_graph['batch'])
         critic_loss = F.mse_loss(batch_td_target, batch_value)
-        print("batch_new_prob.requires_grad:", batch_new_prob.requires_grad)
-        print("batch_log_prob.requires_grad:", batch_log_prob.requires_grad)
-        print("actor_loss.requires_grad:", actor_loss.requires_grad)
-        self.actor_optimizer.zero_grad()
-        actor_loss.backward()
-        self.actor_optimizer.step()
 
         self.critic_optimizer.zero_grad()
         critic_loss.backward()
         self.critic_optimizer.step()
+
+        self.actor_optimizer.zero_grad()
+        actor_loss.backward()
+        before = next(self.actor.parameters()).clone()
+        self.actor_optimizer.step()
+        after = next(self.actor.parameters()).clone()
+    
         return {
             'loss': actor_loss + critic_loss,
             'critic_loss': critic_loss,
@@ -142,23 +134,6 @@ class ModelWrapper:
         }
 
 class Actor(nn.Module):
-    '''
-    POWER_MIN: -160
-    POWER_MAX: 0
-    NUM_POWER_CLASS: 161
-    NUM_FREQ: 5
-    CIR_THRESHOLD: 22
-    GAMMA: 0.99
-    LAMBDA: 0.95
-    EPS_CLIP: 0.2
-    
-    D_MODEL: 128
-    N_HEAD: 4
-    DIM_FEEDFORWARD: 256
-    ACTOR_NUM_LAYERS: 6
-    CRITIC_NUM_LAYERS: 6
-    DROPOUT: 0.0
-    '''
     def __init__(self, config, device):
         super(Actor, self).__init__()
         self._device = device
@@ -188,6 +163,7 @@ class Actor(nn.Module):
         logit = self._output_linear(x)
         unallocated_node = (torch.sum(freq_alloc, dim=1, keepdim=True) < 1.0)
         logit = torch.where(condition=unallocated_node, input=logit, other=-torch.inf)
+
         act_dist = ActDist(logit, ptr, device=self._device)
         return act_dist
 
@@ -260,15 +236,15 @@ class ActDist:
         return entropy
 
     def log_prob(self, action):  # action: (batch, 2(node, freq))
-        action = action.to(self._device)  # 이미 tensor
+        action = torch.as_tensor(action, device=self._device, dtype=torch.long)
         lp = []
         for a, dist in zip(action, self._dist_list):
             if dist is not None:
-                node, freq = a[0], a[1]
+                node, freq = a[0].item(), a[1].item()
                 idx = node * self._num_freq_ch + freq
-                lp.append(dist.log_prob(idx))
+                lp.append(dist.log_prob(torch.tensor(idx, device=self._device)))
             else:
-                lp.append(torch.tensor(-torch.inf).to(self._device))
+                lp.append(torch.tensor(-torch.inf, device=self._device))
         lp = torch.stack(lp, dim=0)
         return lp
 

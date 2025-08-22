@@ -33,16 +33,17 @@ class NetworkEnv:
 
         self.num_freq = self.config['NUM_FREQ']
         self.graph_dataset = InterfGraphDataset(dataset_name)
-        self.graph_dataloader = DataLoader(self.graph_dataset, batch_size=self.config['ENV_BATCH'], shuffle=True)
+        self.graph_dataloader = DataLoader(self.graph_dataset, batch_size=1, shuffle=True)
         self.graph_data_iter = iter(self.graph_dataloader)
 
     def reset(self, num_episode):
         if num_episode is not len(self.graph_dataloader):
-            raise (f'Please check -> len(batch) : {len(self.graph_dataloader)} / num_episode : {num_episode}')
+            print(f'Please check -> len(batch) : {len(self.graph_dataloader)} / num_episode : {num_episode}')
         self.power_graph = next(self.graph_data_iter).to(self.device)
         num_node = self.power_graph.batch.shape[0]
         batch_size = self.power_graph.ptr.shape[0] - 1
         self.reward = 0
+        self.prev_instant_reward = 0
         self.quantized_power_graph = self.quantize_power_attn(self.power_graph)
         self.freq_alloc = torch.zeros(size=(num_node, self.num_freq)).float().to(self.device)
         self.ongoing = torch.full(size=(batch_size,), fill_value=True).to(self.device)
@@ -57,13 +58,9 @@ class NetworkEnv:
         return self.freq_alloc, user_define # state, info
 
     def step(self, action):
-        start_node_idx = self.power_graph.ptr
-        for graph_idx, act in enumerate(action):
-            if self.ongoing[graph_idx]:
-                node, freq = act[0], act[1]
-                self.freq_alloc[start_node_idx[graph_idx] + node, freq] = 1.0
-                self.allocated_node[start_node_idx[graph_idx] + node] = True
-                self.ongoing[graph_idx] = not torch.all(self.allocated_node[start_node_idx[graph_idx]: start_node_idx[graph_idx+1]])
+        node, freq = action[0], action[1]
+        self.freq_alloc[node, freq] = 1.0
+        self.allocated_node[node] = True
         user_define = {
             'x': self.quantized_power_graph['x'],
             'edge_attr': self.quantized_power_graph['edge_attr'],
@@ -71,8 +68,11 @@ class NetworkEnv:
             'ptr': self.quantized_power_graph['ptr'],
             'batch': self.quantized_power_graph['batch'],
         }
-        self.reward = self.cal_reward(self.power_graph, self.freq_alloc) - self.reward
-        return self.freq_alloc, self.reward, not torch.all(self.ongoing), user_define # next_state, reward, done, info
+        instant_reward = self.cal_reward(self.power_graph, self.freq_alloc)
+        self.reward = instant_reward - self.prev_instant_reward
+        self.prev_instant_reward = instant_reward
+
+        return self.freq_alloc.clone(), self.reward, not torch.all(self.allocated_node), user_define # next_state, reward, done, info
     def quantize_power_attn(self, graph):
         graphs = graph.to_data_list()
         power_graphs = []
